@@ -1,6 +1,10 @@
 from telethon import TelegramClient, events
 import requests
+import json
+import asyncio
+import hashlib
 import time
+from urllib.parse import quote
 
 # Dados Telegram (API ID e Hash)
 api_id = 28622181
@@ -11,41 +15,72 @@ app_key = '515092'
 app_secret = 'RlHsRIns4vmoo3iRK0RN2r4k44VqE41r'
 
 # Canais do Telegram
-source_channel = 'promoimporta'       # exemplo: '@canaldepromocoes'
-destination_channel = 'Promo_ali_Imperdiveis' # exemplo: '@meucanalafiliado'
+source_channel = 'promoimporta'
+destination_channel = 'Promo_ali_Imperdiveis'
 
 # Inicializa cliente Telegram
 client = TelegramClient('session_name', api_id, api_hash)
 
-# Função para obter token OAuth da API AliExpress (simplificado)
-def get_access_token():
-    url = 'https://gw.api.alibaba.com/openapi/http/1/system.oauth2/getToken/' 
-    params = {
-        'grant_type': 'client_credentials',
-        'client_id': app_key,
-        'client_secret': app_secret
-    }
-    response = requests.get(url, params=params)
-    data = response.json()
-    return data.get('access_token')
+# Função para gerar assinatura MD5
+def generate_signature(params, secret):
+    # Ordena os parâmetros alfabeticamente
+    sorted_params = sorted(params.items())
+    
+    # Cria string concatenada
+    param_string = ''.join([f'{key}{value}' for key, value in sorted_params])
+    
+    # Adiciona o secret no início e fim
+    sign_string = f'{secret}{param_string}{secret}'
+    
+    # Gera hash MD5
+    return hashlib.md5(sign_string.encode('utf-8')).hexdigest().upper()
 
-# Função para gerar link afiliado pelo AliExpress API
-def gerar_link_afiliado(access_token, link_original):
-    url = 'https://gw.api.alibaba.com/openapi/param2/2/portals.open/api.getPromotionLinks/' 
+# Função para gerar link afiliado usando a API correta
+def gerar_link_afiliado(link_original):
+    # Endpoint correto para Business interfaces
+    url = 'https://gw.api.taobao.com/router/rest'
+    
+    # Timestamp no formato correto
+    timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+    
+    # Parâmetros da requisição
     params = {
-        'access_token': access_token,
-        'site': 'ali', 
-        'traceId': 'trace123',  # pode gerar um ID aleatório
-        'promotionType': 1,
-        'urls': [link_original]
+        'method': 'aliexpress.affiliate.link.generate',
+        'app_key': app_key,
+        'timestamp': timestamp,
+        'format': 'json',
+        'v': '2.0',
+        'sign_method': 'md5',
+        'promotion_link_type': '0',
+        'source_values': link_original
     }
-    response = requests.post(url, json=params)
-    data = response.json()
+    
+    # Gera assinatura
+    signature = generate_signature(params, app_secret)
+    params['sign'] = signature
+    
     try:
-        return data['result']['promotionUrls'][0]['url']
-    except:
+        response = requests.post(url, data=params)
+        if response.status_code == 200:
+            data = response.json()
+            if 'aliexpress_affiliate_link_generate_response' in data:
+                result = data['aliexpress_affiliate_link_generate_response']['resp_result']
+                if result['resp_code'] == 200:
+                    return result['result']['promotion_links'][0]['promotion_link']
+                else:
+                    print(f'Erro na API: {result["resp_msg"]}')
+                    return None
+            else:
+                print('Resposta inesperada da API:', data)
+                return None
+        else:
+            print(f'Erro HTTP: {response.status_code} {response.text}')
+            return None
+    except Exception as e:
+        print(f'Erro na requisição: {e}')
         return None
 
+# Evento para capturar mensagens do canal de origem
 @client.on(events.NewMessage(chats=source_channel))
 async def handler(event):
     texto = event.message.message or ''
@@ -56,20 +91,22 @@ async def handler(event):
 
     if links:
         link_original = links[0]
-        access_token = get_access_token()
-        if access_token:
-            link_afiliado = gerar_link_afiliado(access_token, link_original)
-            if link_afiliado:
-                novo_texto = texto.replace(link_original, link_afiliado)
-            else:
-                novo_texto = texto + "\n\n*Erro ao gerar link afiliado*"
+        link_afiliado = gerar_link_afiliado(link_original)
+        
+        if link_afiliado:
+            # Remove o link original completamente
+            texto_sem_link = texto.replace(link_original, '')
+            # Monta novo texto com link afiliado no lugar
+            novo_texto = texto_sem_link.strip() + '\n\n' + link_afiliado
         else:
-            novo_texto = texto + "\n\n*Erro ao obter token*"
+            novo_texto = texto + "\n\n*Erro ao gerar link afiliado*"
+    else:
+        novo_texto = texto
 
-        if fotos:
-            await client.send_file(destination_channel, fotos, caption=novo_texto)
-        else:
-            await client.send_message(destination_channel, novo_texto)
+    if fotos:
+        await client.send_file(destination_channel, fotos, caption=novo_texto)
+    else:
+        await client.send_message(destination_channel, novo_texto)
 
 async def main():
     await client.start()
@@ -77,6 +114,4 @@ async def main():
     await client.send_message(destination_channel, "Teste: bot funcionando!")
     await client.run_until_disconnected()
 
-import asyncio
 asyncio.run(main())
-
